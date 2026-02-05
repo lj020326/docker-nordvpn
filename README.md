@@ -156,6 +156,12 @@ or on older systems:
 [ENTRYPOINT] Using IPv4 backend: iptables-legacy
 ```
 
+### Building image
+
+```shell
+docker build -t docker-nordvpn --build-arg BUILD_ID=build-12 --build-arg BUILD_DATE=2024-09-30 .
+```
+
 ### Getting Service Credentials
 
 1. Log into your [Nord Account Dashboard](https://my.nordaccount.com/)

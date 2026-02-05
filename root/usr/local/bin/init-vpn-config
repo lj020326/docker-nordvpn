@@ -1,0 +1,186 @@
+#!/bin/bash
+# shellcheck shell=bash
+
+# --- 1. Initialization & Logging ---
+set -eu
+[[ "${DEBUG:-false}" == trace* ]] && set -x
+
+. /usr/local/bin/backend-functions
+
+log "Starting VPN configuration"
+
+log "Run API connection tests for IPs: ${NORDVPNAPI_IP}"
+api-connection-tests
+
+# --- 2. Variable Alignment ---
+# Extracts 'United States' from 'United States;CA;153'
+S_COUNTRIES=$(echo "${COUNTRY:-${SERVER_COUNTRIES:-US}}" | cut -d';' -f1)
+S_GROUP="${GROUP:-${SERVER_GROUP:-11}}"
+S_CITIES="${CITY:-${SERVER_CITIES:-}}"
+S_TOP="${RANDOM_TOP:-0}"
+# Default to openvpn_udp if TECHNOLOGY is unset
+S_TECH="${TECHNOLOGY:-openvpn_udp}"
+# New variable for specific server targeting (e.g., us8408)
+S_SERVER_ID="${SERVER_ID:-}"
+
+log "S_COUNTRIES=${S_COUNTRIES}"
+log "S_GROUP=${S_GROUP}"
+log "S_CITIES=${S_CITIES}"
+log "S_TOP=${S_TOP}"
+log "S_TECH=${S_TECH}"
+log "S_SERVER_ID=${S_SERVER_ID}"
+
+# --- 3. Protocol Derivation Logic ---
+PROTOCOL="udp"
+PORT="1194"
+
+if [[ "${S_TECH,,}" == *"tcp"* ]]; then
+    PROTOCOL="tcp"
+    PORT="443"
+fi
+
+log "Derived Protocol: $PROTOCOL, Port: $PORT from Technology: $S_TECH"
+
+# --- 4. Metadata Loading ---
+DATA_DIR="/usr/local/share/nordvpn/data"
+nvcountries=$(cat "$DATA_DIR/countries.json")
+nvgroups=$(cat "$DATA_DIR/groups.json")
+nvtechnologies=$(cat "$DATA_DIR/technologies.json")
+
+numericregex="^[0-9]+$"
+
+log "OVPN_TEMPLATE_FILE: $OVPN_TEMPLATE_FILE"
+log "OVPN_FILE: $OVPN_FILE"
+
+# --- 5. Unified ID Resolver ---
+get_id() {
+    local type=$1
+    local input=$2
+    local json_data
+
+    case $type in
+        countries) json_data="$nvcountries" ;;
+        groups)    json_data="$nvgroups" ;;
+        tech)      json_data="$nvtechnologies" ;;
+    esac
+
+    if [[ "$input" =~ $numericregex ]]; then
+        echo "$json_data" | jq -r --argjson ID "$input" '.[] | select(.id == $ID) | .id'
+    else
+        # Robust string matching with type checking to avoid 'explode' errors
+        echo "$json_data" | jq -r --arg N "${input,,}" \
+            '.[] | select(
+                ((.name | if type=="string" then ascii_downcase else "" end) == $N) or
+                ((.code | if type=="string" then ascii_downcase else "" end) == $N) or
+                ((.identifier | if type=="string" then ascii_downcase else "" end) == $N) or
+                ((.title | if type=="string" then ascii_downcase else "" end) == $N)
+            ) | .id' | head -n 1
+    fi
+}
+
+# --- 6. Resolve IDs ---
+cid=$(get_id countries "$S_COUNTRIES")
+gid=$(get_id groups "$S_GROUP")
+tid=$(get_id tech "$S_TECH")
+
+[[ -z "$cid" ]] && { log_error "$SCRIPT_NAME" "Could not resolve Country: $S_COUNTRIES"; exit 1; }
+[[ -z "$gid" ]] && { log_error "$SCRIPT_NAME" "Could not resolve Group: $S_GROUP"; exit 1; }
+[[ -z "$tid" ]] && { log_error "$SCRIPT_NAME" "Could not resolve Tech: $S_TECH"; exit 1; }
+
+# City Filtering
+city_filter=""
+if [[ -n "$S_CITIES" ]]; then
+    # Added .[] | iterator to prevent jq array errors
+    # Extract the first city from the list
+    first_city=$(echo "$S_CITIES" | cut -d';' -f1)
+
+#    cityid=$(echo "$nvcountries" | jq -r --argjson CID "$cid" --arg CNAME "$S_CITIES" \
+#        '.[] | select(.id == $CID) | .cities[] | select(.name == $CNAME or .dns_name == $CNAME or (.id|tostring == $CNAME)) | .id' | head -n 1)
+    cityid=$(echo "$nvcountries" | jq -r --argjson CID "$cid" --arg CNAME "$first_city" \
+        '.[] | select(.id == $CID) | .cities[] | select(.name == $CNAME or .dns_name == $CNAME or (.id|tostring == $CNAME)) | .id' | head -n 1)
+    [[ -n "$cityid" ]] && city_filter="&filters\[servers_city.id\]=$cityid"
+    log_debug "first_city: $first_city"
+    log_debug "city_filter: $city_filter"
+fi
+
+# --- 7. Fetch Recommended Servers ---
+log "Fetching recommendations for Country:$cid, Group:$gid, Tech:$tid"
+
+limit=$(( S_TOP > 20 ? S_TOP : 20 ))
+
+#api_url="https://api.nordvpn.com/v1/servers/recommendations?filters\[country_id\]=$cid&filters\[servers_groups.id\]=$gid&filters\[servers_technologies.id\]=$tid$city_filter&limit=$limit"
+api_url="https://api.nordvpn.com/v1/servers/recommendations?filters[country_id]=$cid&filters[servers_groups.id]=$gid&filters[servers_technologies.id]=$tid${city_filter}&limit=$limit"
+
+log_debug "api_url=${api_url}"
+
+# Pick the first IP from our whitelisted API IPs to force resolution
+# This bypasses 'exit 6' DNS resolution failures
+target_api_ip="${NORDVPNAPI_IP%%;*}"
+
+log_debug "Using API IP resolution: api.nordvpn.com -> $target_api_ip"
+
+#resp=$(curl -s --connect-timeout 10 -g "$api_url")
+resp=$(curl -f -s -g --connect-timeout 10 \
+    --resolve "api.nordvpn.com:443:${target_api_ip}" \
+    "$api_url")
+
+# Enhanced error checking
+if [[ -z "$resp" ]]; then
+    log_error "NordVPN API returned an empty response via $target_api_ip"
+    exit 1
+fi
+
+if [[ $(echo "$resp" | jq '. | length') -eq 0 ]]; then
+    log_error "No servers found matching: Country:$cid, Group:$gid, Tech:$tid"
+    exit 1
+fi
+
+# Sort by load
+pool=$(echo "$resp" | jq -c 'sort_by(.load) | .[]')
+
+log_debug "S_SERVER_ID=${S_SERVER_ID}"
+
+SELECTED_JSON=""
+
+# Priority 1: Specific SERVER_ID check (Best of Both Worlds)
+if [[ -n "${S_SERVER_ID:-}" ]]; then
+    log "Specific server requested: $S_SERVER_ID. Searching recommendations..."
+    MATCH=$(echo "$pool" | jq -c --arg ID "$S_SERVER_ID" 'select(.hostname | contains($ID))' | head -n 1)
+
+    if [[ -n "$MATCH" ]]; then
+        log "Target server $S_SERVER_ID found in recommended pool."
+        SELECTED_JSON="$MATCH"
+    else
+        log "Target server $S_SERVER_ID not in current recommendations. Falling back to load-based selection."
+    fi
+fi
+
+# Priority 2: Fallback to Random Top or Best Loaded
+if [[ -z "$SELECTED_JSON" ]]; then
+    if [[ "$S_TOP" -ne 0 ]]; then
+        SELECTED_JSON=$(echo "$pool" | head -n "$S_TOP" | shuf -n 1)
+    else
+        SELECTED_JSON=$(echo "$pool" | head -n 1)
+    fi
+fi
+
+SELECTED_HOSTNAME=$(echo "$SELECTED_JSON" | jq -r '.hostname')
+SELECTED_IP=$(echo "$SELECTED_JSON" | jq -r '.station')
+SELECTED_NAME=$(echo "$SELECTED_JSON" | jq -r '.name')
+LOAD=$(echo "$SELECTED_JSON" | jq -r '.load')
+
+log "Selected: $SELECTED_NAME ($SELECTED_HOSTNAME) at $SELECTED_IP (Load: $LOAD%)"
+
+# --- 8. Apply Configuration to Template ---
+log "Writing OVPN config to $OVPN_FILE"
+cp "$OVPN_TEMPLATE_FILE" "$OVPN_FILE"
+chmod 0600 "$OVPN_FILE"
+chown nordvpn:nordvpn "$OVPN_FILE"
+
+log "Configuring VPN settings (IP: $SELECTED_IP, PORT: $PORT, Protocol: $PROTOCOL)"
+sed -i "s/__IP__/$SELECTED_IP/g" "$OVPN_FILE"
+sed -i "s/__PROTOCOL__/$PROTOCOL/g" "$OVPN_FILE"
+sed -i "s/__PORT__/$PORT/g" "$OVPN_FILE"
+sed -i "s/__X509_NAME__/$SELECTED_HOSTNAME/g" "$OVPN_FILE"
+
+log "VPN configuration completed"

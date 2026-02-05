@@ -1,13 +1,11 @@
-#!/command/with-contenv sh
-# shellcheck shell=sh
+#!/command/with-contenv bash
+# shellcheck shell=bash
 
 set -eu
 
 . /usr/local/bin/backend-functions
 
-SCRIPT_NAME="VPN-HEALTHCHECK"
-
-log "$SCRIPT_NAME" "Starting VPN health check"
+log "Starting VPN health check"
 
 httpreq()
 {
@@ -19,22 +17,22 @@ httpreq()
 }
 
 counter=1
-while [ $counter -le "$check_connection_attempts" ]; do
+while [ $counter -le "$CHECK_CONNECTION_ATTEMPTS" ]; do
     # Convert semicolon separated list to space separated
     oldIFS="$IFS"; IFS=',;'
-    for url in $check_connection_url; do
+    for url in $CHECK_CONNECTION_URL; do
         if httpreq "$url"; then
-            log "$SCRIPT_NAME" "VPN connection is active"
+            log "VPN connection is active"
             exit 0
         fi
     done
     IFS="$oldIFS"
 
-    log "$SCRIPT_NAME" "Connection attempt $counter/$check_connection_attempts failed, retrying in $check_connection_attempt_interval seconds"
-    sleep "$check_connection_attempt_interval"
+    log "Connection attempt $counter/$CHECK_CONNECTION_ATTEMPTS failed, retrying in $CHECK_CONNECTION_ATTEMPT_INTERVAL seconds"
+    sleep "$CHECK_CONNECTION_ATTEMPT_INTERVAL"
     counter=$((counter + 1))
 done
 
-log "$SCRIPT_NAME" "All connection attempts failed, triggering VPN reconnection"
+log "All connection attempts failed, triggering VPN reconnection"
 vpn-reconnect
 exit 1

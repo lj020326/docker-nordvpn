@@ -1,0 +1,71 @@
+#!/bin/bash
+# shellcheck shell=bash
+
+set -eu
+
+. /usr/local/bin/backend-functions
+
+invoker_prefix=""
+# BASH_SOURCE[3] is the file that executed the current script
+if [ -n "${BASH_VERSION:-}" ] && [[ -n "${BASH_SOURCE[3]:-}" ]]; then
+    parent_script="${BASH_SOURCE[3]##*/}"
+    invoker_prefix="(Invoker: ${parent_script}) "
+fi
+
+run_ping_test() {
+    test_ip=$1
+    log_test "$LOG_DEBUG" "Ping test"
+    log_test "$LOG_DEBUG" "test_ip=${test_ip}"
+    if ping -4 -c 1 -W 2 "${test_ip%;*}" >/dev/null 2>&1; then
+        log_test "$LOG_SUCCESS" "ICMP to API IP successful"
+    else
+        log_test "$LOG_FAILED" "CANARY: ICMP to API IP FAILED"
+        exit 1
+    fi
+}
+
+run_curl_ip_test() {
+    test_ip=$1
+    log_test "$LOG_DEBUG" "Curl the host directly with IP resolve (ignoring cert for a moment just to check connectivity)"
+    log_test "$LOG_DEBUG" "test_ip=${test_ip}"
+    # Force curl to use the IP that we know is whitelisted in the firewall
+    CANARY_CHECK=$(curl -s -k --resolve "api.nordvpn.com:443:${test_ip}" --connect-timeout 5 "https://api.nordvpn.com/v1/servers/countries" | grep -o "United States" | head -n 1)
+    if [ "$CANARY_CHECK" = "United States" ]; then
+        log_test "$LOG_SUCCESS" "Direct IP Connectivity successful"
+    else
+        log_test "$LOG_FAILED" "CANARY: Direct IP Connectivity FAILED"
+        exit 1
+    fi
+}
+
+run_curl_host_test() {
+    test_ip=$1
+    log_test "$LOG_DEBUG" "Curl the IP directly (ignoring cert for a moment just to check connectivity)"
+    CANARY_CHECK=$(curl -s -k -H "Host: api.nordvpn.com" --connect-timeout 5 "https://${test_ip%;*}/v1/servers/countries" | grep -o "United States" | head -n 1)
+    if [ "$CANARY_CHECK" = "United States" ]; then
+        log_test "$LOG_SUCCESS" "Direct IP Connectivity successful"
+    else
+        log_test "$LOG_FAILED" "CANARY: Direct IP Connectivity FAILED"
+        exit 1
+    fi
+}
+
+log_test "$LOG_DEBUG" "Starting Network NordVPN API Canary Tests..."
+log_test "$LOG_DEBUG" "NORDVPNAPI_IP: ${NORDVPNAPI_IP}"
+
+# 1. Use read to split the string into a Bash array
+IFS=';' read -ra ADDR_ARRAY <<< "$NORDVPNAPI_IP"
+
+# 2. Iterate over the array elements
+for test_api_ip in "${ADDR_ARRAY[@]}"; do
+    # Skip empty entries if they exist
+    [[ -z "$test_api_ip" ]] && continue
+
+    log_test "$LOG_DEBUG" "Run API connection tests for IP: ${test_api_ip}"
+
+    run_ping_test "${test_api_ip}"
+    run_curl_ip_test "${test_api_ip}"
+    run_curl_host_test "${test_api_ip}"
+done
+
+log "API Connection tests completed" "${invoker_prefix}"

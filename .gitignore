@@ -1,1 +1,4 @@
-docker-compose.yml
+
+.idea/
+save/
+.DS_Store

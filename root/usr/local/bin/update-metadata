@@ -1,0 +1,49 @@
+#!/bin/bash
+# shellcheck shell=bash
+
+set -eu
+
+. /usr/local/bin/backend-functions
+
+log "Update to the latest IP for NORDVPNAPI_IP"
+
+# Resolves all current IPs using nslookup (standard in Alpine/busybox)
+# 1. nslookup: queries the API
+# 2. awk: matches any line containing 'Address' (ignoring leading whitespace)
+# 3. sed: removes the 'Address:' or 'Address' prefix and any whitespace
+# 4. grep: ensures we only keep valid IPv4 patterns (skips the DNS server's address)
+CURRENT_API_IP=$(nslookup api.nordvpn.com 2>/dev/null | \
+                 awk '/Address/ { print $NF }' | \
+                 grep -E '^[0-9.]+$' | \
+                 sort -u | \
+                 paste -sd ';' -)
+#CURRENT_API_IP=$(getent hosts api.nordvpn.com | awk '{ print $1 }' | sort -u | paste -sd ';' -)
+
+log "CURRENT_API_IP: ${CURRENT_API_IP}"
+
+#if [ -z "$CURRENT_API_IP" ]; then
+#    log_warning "Could not resolve api.nordvpn.com using nslookup"
+#    # Fallback to getent if nslookup failed entirely
+#    CURRENT_API_IP=$(getent hosts api.nordvpn.com | awk '{ print $1 }' | sort -u | paste -sd ';' -)
+#fi
+
+if [ -z "$CURRENT_API_IP" ]; then
+    abort "Could not resolve api.nordvpn.com"
+else
+    log "Update ${ENV_DIR}/CURRENT_API_IP to: ${CURRENT_API_IP}"
+    printf '%s' "${CURRENT_API_IP}" > "${ENV_DIR}/CURRENT_API_IP"
+    log "Current Resolved NordVPN API IPs: ${CURRENT_API_IP}"
+
+    # Now pass the full semicolon-separated list to the connection tests
+#    log "Run API connection tests for IPs: ${CURRENT_API_IP}"
+    export NORDVPNAPI_IP="${CURRENT_API_IP}"
+    log "Run API connection tests for IPs: ${NORDVPNAPI_IP}"
+    api-connection-tests
+fi
+
+log "Refreshing NordVPN API definitions at ${METADATA_DIR}..."
+curl -s https://api.nordvpn.com/v1/servers/countries > ${METADATA_DIR}/countries.json
+curl -s https://api.nordvpn.com/v1/servers/groups > ${METADATA_DIR}/groups.json
+curl -s https://api.nordvpn.com/v1/technologies > ${METADATA_DIR}/technologies.json
+log "Refresh metadata complete."
+exit 0

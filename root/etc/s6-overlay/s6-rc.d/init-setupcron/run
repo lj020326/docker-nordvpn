@@ -1,44 +1,50 @@
-#!/command/with-contenv sh
-# shellcheck shell=sh
+#!/command/with-contenv bash
+# shellcheck shell=bash
 
 set -eu
 
 . /usr/local/bin/backend-functions
 
-SCRIPT_NAME="INIT-SETUPCRON"
+log "Starting cron configuration"
 
-log "$SCRIPT_NAME" "Starting cron configuration"
+# POSIX-compliant trace check
+case "${DEBUG:-false}" in
+    trace*)
+      set -x
+      echo "${SCRIPT_NAME} DEBUG value is: ${DEBUG+set to '$DEBUG'}" >&2
+      ;;
+esac
 
 # Validate cron-related environment variables
-if [ -n "${recreate_vpn_cron:-}" ]; then
-    log "$SCRIPT_NAME" "VPN recreation cron: $recreate_vpn_cron ($(parse_cron "$recreate_vpn_cron"))"
+if [ -n "${RECREATE_VPN_CRON:-}" ]; then
+    log "VPN recreation cron: $RECREATE_VPN_CRON ($(parse_cron "$RECREATE_VPN_CRON"))"
 else
-    log "$SCRIPT_NAME" "VPN recreation cron not configured"
+    log "VPN recreation cron not configured"
 fi
 
-if [ -n "${check_connection_cron:-}" ]; then
-    log "$SCRIPT_NAME" "Health check cron: $check_connection_cron ($(parse_cron "$check_connection_cron"))"
+if [ -n "${CHECK_CONNECTION_CRON:-}" ]; then
+    log "Health check cron: $CHECK_CONNECTION_CRON ($(parse_cron "$CHECK_CONNECTION_CRON"))"
     
     # Validate CHECK_CONNECTION_* variables that are used by vpn-healthcheck
     
-    if [ -z "$check_connection_attempts" ] || [ "$check_connection_attempts" -le 0 ]; then
-        log_error "$SCRIPT_NAME" "ERROR: CHECK_CONNECTION_ATTEMPTS must be a positive integer, got: '$check_connection_attempts'"
+    if [ -z "$CHECK_CONNECTION_ATTEMPTS" ] || [ "$CHECK_CONNECTION_ATTEMPTS" -le 0 ]; then
+        log_error "ERROR: CHECK_CONNECTION_ATTEMPTS must be a positive integer, got: '$CHECK_CONNECTION_ATTEMPTS'"
         exit 1
     fi
     
-    if [ -z "$check_connection_url" ]; then
-        log_error "$SCRIPT_NAME" "ERROR: CHECK_CONNECTION_URL must be set"
+    if [ -z "$CHECK_CONNECTION_URL" ]; then
+        log_error "ERROR: CHECK_CONNECTION_URL must be set"
         exit 1
     fi
     
-    if [ -z "$check_connection_attempt_interval" ] || [ "$check_connection_attempt_interval" -le 0 ]; then
-        log_error "$SCRIPT_NAME" "ERROR: CHECK_CONNECTION_ATTEMPT_INTERVAL must be a positive integer, got: '$check_connection_attempt_interval'"
+    if [ -z "$CHECK_CONNECTION_ATTEMPT_INTERVAL" ] || [ "$CHECK_CONNECTION_ATTEMPT_INTERVAL" -le 0 ]; then
+        log_error "ERROR: CHECK_CONNECTION_ATTEMPT_INTERVAL must be a positive integer, got: '$CHECK_CONNECTION_ATTEMPT_INTERVAL'"
         exit 1
     fi
     
     # Validation passed
 else
-    log "$SCRIPT_NAME" "Health check cron not configured, skipping validation"
+    log "Health check cron not configured, skipping validation"
 fi
 
 cron_dir="/var/spool/cron/crontabs"
@@ -47,17 +53,17 @@ cron_file="$cron_dir/root"
 rm -f "$cron_file"
 touch "$cron_file"
 
-if [ -n "${recreate_vpn_cron:-}" ]; then
-    echo "$recreate_vpn_cron vpn-reconnect" >> "$cron_file"
+if [ -n "${RECREATE_VPN_CRON:-}" ]; then
+    echo "$RECREATE_VPN_CRON vpn-reconnect" >> "$cron_file"
 else
-    log "$SCRIPT_NAME" "VPN reconnection cron not configured"
+    log "VPN reconnection cron not configured"
 fi
 
-if [ -n "${check_connection_cron:-}" ]; then
-    echo "$check_connection_cron vpn-healthcheck" >> "$cron_file"
+if [ -n "${CHECK_CONNECTION_CRON:-}" ]; then
+    echo "$CHECK_CONNECTION_CRON vpn-healthcheck" >> "$cron_file"
 else
-    log "$SCRIPT_NAME" "Health check cron not configured"
+    log "Health check cron not configured"
 fi
 
-log "$SCRIPT_NAME" "Cron configuration completed"
+log "Cron configuration completed"
 exit 0

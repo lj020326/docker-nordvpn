@@ -1,0 +1,15 @@
+#!/command/with-contenv bash
+# shellcheck shell=bash
+
+set -eu
+
+. /usr/local/bin/backend-functions
+
+log "Refreshing NordVPN API definitions..."
+
+if [ "${UPDATE_METADATA:-false}" = "true" ] || [ "${UPDATE_METADATA:-0}" = "1" ]; then
+    /usr/local/bin/update-metadata
+fi
+
+log "Refresh metadata complete."
+exit 0

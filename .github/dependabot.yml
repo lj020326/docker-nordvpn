@@ -17,9 +17,9 @@ updates:
       - "automation"
     open-pull-requests-limit: 5
     reviewers:
-      - "azinchen"
+      - "lj020326"
     assignees:
-      - "azinchen"
+      - "lj020326"
 
   # Configuration for Dockerfile - Security-focused updates
   - package-ecosystem: "docker"
@@ -37,6 +37,6 @@ updates:
       - "security"
     open-pull-requests-limit: 5
     reviewers:
-      - "azinchen"
+      - "lj020326"
     assignees:
-      - "azinchen"
+      - "lj020326"

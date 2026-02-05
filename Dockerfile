@@ -44,8 +44,14 @@ RUN echo "**** install security fix packages ****" && \
 # rootfs builder
 FROM alpine:3.23.3 AS rootfs-builder
 
-ARG IMAGE_VERSION=N/A \
-    BUILD_DATE=N/A
+ARG IMAGE_VERSION="N/A"
+ARG IMAGE_AUTHOR="Lee Johnson <ljohnson@dettonville.com>"
+ARG IMAGE_REPOSITORY="https://github.com/lj020326/nordvpn"
+ARG BUILD_ID="N/A"
+ARG BUILD_DATE="N/A"
+ARG UPDATE_METADATA=true
+ARG NORDVPNAPI_IP_DEFAULT="104.16.208.203;104.19.159.190"
+ARG METADATA_DIR="/usr/local/share/nordvpn/data"
 
 RUN echo "**** install security fix packages ****" && \
     echo "**** install mandatory packages ****" && \
@@ -64,36 +70,39 @@ RUN chmod +x /rootfs/usr/local/bin/* || true && \
         jq -c . "$f" > "$f.tmp" && mv "$f.tmp" "$f"; \
     done && \
     safe_sed() { \
-        local pattern="$1"; \
-        local replacement="$2"; \
-        local file="$3"; \
-        local delim; \
-        for delim in '/' '|' '#' '@' '%' '^' '&' '*' '+' '-' '_' '=' ':' ';' '<' '>' ',' '.' '?' '~' '`' '!' '$' '(' ')' '[' ']' '{' '}' '\\' '"' "'"; do \
-            if [[ "$replacement" != *"$delim"* ]]; then \
-                sed -i "s$delim$pattern$delim$replacement$delim g" "$file"; \
-                return; \
-            fi; \
-        done; \
-        echo "No safe delimiter found for $pattern in $file"; \
-    } && \
-    safe_sed "__IMAGE_VERSION__" "${IMAGE_VERSION}" /rootfs/usr/local/bin/entrypoint && \
-    safe_sed "__BUILD_DATE__" "${BUILD_DATE}" /rootfs/usr/local/bin/entrypoint
+        sed -i "s|${1}|${2}|g" "${3}" \
+    ; } && \
+    safe_sed "__IMAGE_VERSION__" "${IMAGE_VERSION}" /rootfs/usr/local/bin/init-environment && \
+    safe_sed "__IMAGE_AUTHOR__" "${IMAGE_AUTHOR}" /rootfs/usr/local/bin/init-environment && \
+    safe_sed "__IMAGE_REPOSITORY__" "${IMAGE_REPOSITORY}" /rootfs/usr/local/bin/init-environment && \
+    safe_sed "__BUILD_ID__" "${BUILD_ID}"   /rootfs/usr/local/bin/init-environment && \
+    safe_sed "__BUILD_DATE__" "${BUILD_DATE}"   /rootfs/usr/local/bin/init-environment && \
+    safe_sed "__NORDVPNAPI_IP_DEFAULT__" "${NORDVPNAPI_IP_DEFAULT}" /rootfs/usr/local/bin/init-environment
+
 COPY --from=s6-builder /s6/ /rootfs/
 
 # Main image
 FROM alpine:3.23.3
 
 ARG TARGETPLATFORM
-ARG IMAGE_VERSION=N/A \
-    BUILD_DATE=N/A
 
-LABEL org.opencontainers.image.authors="Alexander Zinchenko <alexander@zinchenko.com>" \
+ARG IMAGE_VERSION="N/A"
+ARG IMAGE_AUTHOR="Lee Johnson <ljohnson@dettonville.com>"
+ARG IMAGE_REPOSITORY="https://github.com/lj020326/nordvpn"
+ARG BUILD_ID="N/A"
+ARG BUILD_DATE="N/A"
+ARG UPDATE_METADATA=true
+ARG NORDVPNAPI_IP_DEFAULT="104.16.208.203;104.19.159.190"
+ARG METADATA_DIR="/usr/local/share/nordvpn/data"
+
+LABEL org.opencontainers.image.authors="${IMAGE_AUTHOR}" \
       org.opencontainers.image.description="OpenVPN client docker container that routes other containers' traffic through NordVPN servers automatically." \
-      org.opencontainers.image.source="https://github.com/azinchen/nordvpn" \
+      org.opencontainers.image.source="${IMAGE_REPOSITORY}" \
       org.opencontainers.image.licenses="AGPL-3.0" \
       org.opencontainers.image.title="NordVPN OpenVPN Docker Container" \
-      org.opencontainers.image.url="https://github.com/azinchen/nordvpn" \
+      org.opencontainers.image.url="${IMAGE_REPOSITORY}" \
       org.opencontainers.image.version="${IMAGE_VERSION}" \
+      org.opencontainers.image.build_id="${BUILD_ID}" \
       org.opencontainers.image.created="${BUILD_DATE}"
 
 ENV S6_CMD_WAIT_FOR_SERVICES_MAXTIME=120000
@@ -102,6 +111,7 @@ RUN echo "**** install security fix packages ****" && \
     echo "**** install mandatory packages ****" && \
     echo "Target platform: ${TARGETPLATFORM}" && \
     apk --no-cache --no-progress add \
+        bash=5.3.3-r1 \
         curl=8.17.0-r1 \
         iptables=1.8.11-r1 \
         iptables-legacy=1.8.11-r1 \
@@ -120,5 +130,12 @@ RUN echo "**** install security fix packages ****" && \
     rm -rf /var/cache/apk/*
 
 COPY --from=rootfs-builder /rootfs/ /
+WORKDIR "${METADATA_DIR}"
 
-ENTRYPOINT ["/usr/local/bin/entrypoint"]
+ENV CURL_UPDATE_METADATA="curl -s https://api.nordvpn.com/v1/servers/countries > countries.json && \
+    curl -s https://api.nordvpn.com/v1/servers/groups > groups.json && \
+    curl -s https://api.nordvpn.com/v1/technologies > technologies.json"
+
+RUN if [[ "${UPDATE_METADATA}" == "true" ]] ; then eval ${CURL_UPDATE_METADATA} ; fi
+
+ENTRYPOINT ["/init"]

@@ -1,0 +1,13 @@
+#!/command/with-contenv bash
+# shellcheck shell=bash
+
+set -eu
+
+# helpers/logging
+. /usr/local/bin/backend-functions
+
+log "Initializing shared container environment"
+/usr/local/bin/init-environment
+log "Shared backend container environment configured successfully"
+
+exit 0

@@ -1,80 +1,54 @@
-#!/command/with-contenv sh
-# shellcheck shell=sh
+#!/command/with-contenv bash
+# shellcheck shell=bash
 
 set -eu
 
 . /usr/local/bin/backend-functions
 
-SCRIPT_NAME="SERVICE-NORDVPN"
+# Run the configuration script
+log "Run the motd"
+/usr/local/bin/motd
 
-log "$SCRIPT_NAME" "Starting NordVPN service"
+log "Starting NordVPN service - $(date '+%Y-%m-%d %H:%M:%S')"
 
-# -------- helpers --------
-normalize_proto()
-{
-    # Map OpenVPN tokens to "udp" or "tcp" (family handled by IP literal)
-    case "$(echo "$1" | tr 'A-Z' 'a-z')" in
-        tcp|tcp-client|tcp-server|tcp6|tcp6-client|tcp6-server) echo "tcp" ;;
-        udp|udp-client|udp-server|udp6|udp6-client|udp6-server|"") echo "udp" ;;
-        * ) echo "udp" ;;
-    esac
-}
-
-vpn-config
-
-# -------- parse the single 'remote' line --------
-[ -s "$ovpnfile" ] || { log_error "$SCRIPT_NAME" "CRITICAL ERROR: OVPN file not found: $ovpnfile - sleeping infinite" >&2; sleep infinity; }
-
-r_line="$(awk '/^[[:space:]]*remote[ \t]+/ {print; exit}' "$ovpnfile")"
-[ -n "$r_line" ] || { log_error "$SCRIPT_NAME" "CRITICAL ERROR: No 'remote' line in $ovpnfile - sleeping infinite" >&2; sleep infinity; }
-
-# Fields: remote <ip> [port] [proto]
-r_ip_raw="$(echo "$r_line" | awk '{print $2}')"
-r_port="$(echo "$r_line"   | awk '{print $3}')"
-r_proto_raw="$(echo "$r_line" | awk '{print $4}')"
-
-# Fallbacks from file if not specified on the remote line
-[ -n "${r_port:-}" ] || r_port="$(awk '/^[[:space:]]*port[ \t]+/ {print $2; exit}' "$ovpnfile" || true)"
-[ -n "${r_port:-}" ] || r_port=1194
-r_proto="$(normalize_proto "$r_proto_raw")"
-
-# Clean up any bracketed IPv6 (just in case)
-r_ip="$(echo "$r_ip_raw" | sed 's,^\[,,' | sed 's,\]$,,' )"
-
-# -------- add a single temporary pinhole on eth0 --------
-
-PIN_SPEC="-A VPN-SERVER -o eth0 -p ${r_proto} -d ${r_ip} --dport ${r_port} -j ACCEPT"
-if run4 $PIN_SPEC 2>/dev/null; then
-    log "$SCRIPT_NAME" "Added firewall pinhole for ${r_proto} traffic to ${r_ip}:${r_port} on interface eth0"
+# Add additional start up options
+if ! echo "$OPENVPN_OPTS" | grep -q -- "--data-ciphers"; then
+    log "Adding default --data-ciphers"
+    OPENVPN_OPTS="$OPENVPN_OPTS --data-ciphers AES-256-CBC:AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305"
 fi
 
-# Add --data-ciphers if not already present in OPENVPN_OPTS
-if ! echo "$openvpn_opts" | grep -q -- "--data-ciphers"; then
-    log "$SCRIPT_NAME" "Adding default --data-ciphers to prevent cipher deprecation warning"
-    openvpn_opts="$openvpn_opts --data-ciphers AES-256-CBC:AES-256-GCM:AES-128-GCM:CHACHA20-POLY1305"
-fi
+log "Launching OpenVPN"
+openvpn --group nordvpn --config "$OVPN_FILE" --auth-user-pass "$OVPN_AUTH_FILE" --auth-nocache --management "$MGMT_SOCK_FILE" unix $OPENVPN_OPTS &
+VPN_PID=$!
 
-log "$SCRIPT_NAME" "Launching OpenVPN"
-openvpn --group nordvpn --config "$ovpnfile" --auth-user-pass "$authfile" --auth-nocache --management "$mgmtsockfile" unix $openvpn_opts &
-
-# Wait for VPN connection
-log "$SCRIPT_NAME" "Waiting for VPN connection..."
+# 6. Wait and Monitor
+log "Waiting for VPN connection..."
 counter=0
 while ! is_vpn_connected && [ $counter -lt 30 ]; do
+    # Check if the process is still alive
+    if ! kill -0 $VPN_PID 2>/dev/null; then
+        log_error "OpenVPN process died immediately"
+        exit 1
+    fi
     sleep 2
     counter=$((counter + 1))
 done
 
 if is_vpn_connected; then
-    log "$SCRIPT_NAME" "VPN connection established"
-    # Run network diagnostic if enabled
-    if [ "$network_diagnostic_enabled" = "true" ] || [ "$network_diagnostic_enabled" = "1" ]; then
-        log "$SCRIPT_NAME" "Running network diagnostic..."
+    log "VPN connection established successfully"
+
+    if [ "${NETWORK_DIAGNOSTIC_ENABLED:-false}" = "true" ] || [ "${NETWORK_DIAGNOSTIC_ENABLED:-0}" = "1" ]; then
+        log "Running network diagnostic..."
         network-diagnostic
     fi
-else
-    log "$SCRIPT_NAME" "VPN connection timed out"
-fi
 
-# Wait for OpenVPN to exit
-wait
+    # 8. Keep script alive by waiting for OpenVPN
+    log "Monitoring OpenVPN process (PID: $VPN_PID)"
+
+    # Keeping the service alive
+    wait $VPN_PID
+else
+    log_error "VPN timed out"
+    kill $VPN_PID 2>/dev/null
+    exit 1
+fi

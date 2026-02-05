@@ -1,23 +1,21 @@
-#!/command/with-contenv sh
-# shellcheck shell=sh
+#!/command/with-contenv bash
+# shellcheck shell=bash
 
 set -eu
 
 . /usr/local/bin/backend-functions
 
-SCRIPT_NAME="INIT-ADDUSER"
+log "Starting user initialization"
 
-log "$SCRIPT_NAME" "Starting user initialization"
-
-if [ "$(id -g nordvpn)" -ne "$pgid" ]; then
-    log "$SCRIPT_NAME" "Updating nordvpn group ID from $(id -g nordvpn) to $pgid"
-    groupmod --non-unique --gid "$pgid" nordvpn
+if [ "$(id -g nordvpn)" -ne "$PGID" ]; then
+    log "Updating nordvpn group ID from $(id -g nordvpn) to $PGID"
+    groupmod --non-unique --gid "$PGID" nordvpn
 fi
 
-if [ "$(id -u nordvpn)" -ne "$puid" ]; then
-    log "$SCRIPT_NAME" "Updating nordvpn user ID from $(id -u nordvpn) to $puid"
-    usermod --non-unique --uid "$puid" nordvpn
+if [ "$(id -u nordvpn)" -ne "$PUID" ]; then
+    log "Updating nordvpn user ID from $(id -u nordvpn) to $PUID"
+    usermod --non-unique --uid "$PUID" nordvpn
 fi
 
-log "$SCRIPT_NAME" "User initialization completed"
+log "User initialization completed"
 exit 0

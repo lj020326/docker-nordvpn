@@ -1,0 +1,5 @@
+init-environment
+init-adduser
+init-createauth
+init-firewall
+init-metadata

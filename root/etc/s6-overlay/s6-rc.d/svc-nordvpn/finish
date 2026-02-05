@@ -1,5 +1,5 @@
-#!/command/with-contenv sh
-# shellcheck shell=sh
+#!/command/with-contenv bash
+# shellcheck shell=bash
 
 set -eu
 
@@ -7,17 +7,17 @@ set -eu
 
 SCRIPT_NAME="SERVICE-NORDVPN"
 
-log "$SCRIPT_NAME" "Stopping NordVPN service"
+log "Stopping NordVPN service"
 
-log "$SCRIPT_NAME" "Cleaning up VPN firewall rules"
+log "Cleaning up VPN firewall rules"
 run4 -F VPN-SERVER
 
-log "$SCRIPT_NAME" "Disconnecting OpenVPN"
-echo "signal SIGTERM" | nc -U "$mgmtsockfile"
+log "Disconnecting OpenVPN"
+echo "signal SIGTERM" | nc -U "$MGMT_SOCK_FILE"
 sleep 5
 
-log "$SCRIPT_NAME" "Cleaning up VPN configuration files"
+log "Cleaning up VPN configuration files"
 rm -f /run/xt/nordvpn.ovpn
 
-log "$SCRIPT_NAME" "NordVPN service stopped"
+log "NordVPN service stopped"
 exit 0

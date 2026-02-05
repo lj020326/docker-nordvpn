@@ -1,0 +1,116 @@
+#!/bin/bash
+# shellcheck shell=bash
+
+set -eu
+
+. /usr/local/bin/backend-functions
+
+# In s6-overlay (v3+ in particular), the recommended and most idiomatic way to share a set of
+# computed / dynamic environment variables across multiple services (oneshots + longruns)
+# is not to create and source a traditional .env shell file like /run/xt/backend.env.
+#
+# Instead, use the built-in mechanism using a service (s6-rc.d/init-environment):
+#   Write name=value pairs as files into /var/run/s6/container_environment/
+#   (or /run/s6/container_environment/ — both are usually symlinked)
+#   s6-overlay automatically imports every file in that directory as an environment variable
+#     (filename = variable name, content = value)
+#   into every process that is started with #!/usr/bin/with-contenv or #!/command/with-contenv
+#
+# Then make sure services that need these variables depend on it:
+# text# Example: in svc-nordvpn/dependencies
+#   init-environment
+#   init-adduser
+#   init-createauth
+#   init-firewall
+
+log "Initializing environment"
+
+######
+# IPT
+
+pick_ipv4_backend
+pick_ipv6_backend
+verify_ipv6_backend
+
+mkdir -p /run/xt
+
+# Capture the results from the helper variables if they aren't already mapped
+IPT="${_IPT:-}"
+IP6T="${_IP6T:-}"
+
+if [ -z "${IPT:-}" ]; then
+    log_error "No working IPv4 backend (iptables/legacy) found"
+    exit 1
+fi
+
+# ────────────────────────────────────────────────
+#  Write computed / defaulted values as files
+# ────────────────────────────────────────────────
+
+ENV_DIR="/var/run/s6/container_environment"
+mkdir -p "${ENV_DIR}"
+
+# Write to s6 container environment
+printf '%s' "${ENV_DIR}"                   > "${ENV_DIR}/ENV_DIR"
+printf '%s' "${LOG_LEVEL:-INFO}"           > "${ENV_DIR}/LOG_LEVEL"
+
+# actual values replace the following __PLACEHOLDER__ values in docker build
+OPENVPN_VERSION_INFO=$(openvpn --version | head -1)
+
+_NORDVPNAPI_IP_DEFAULT="__NORDVPNAPI_IP_DEFAULT__"
+_IMAGE_AUTHOR="__IMAGE_AUTHOR__"
+_IMAGE_REPOSITORY="__IMAGE_REPOSITORY__"
+_IMAGE_DOCUMENTATION="${_IMAGE_REPOSITORY}#readme"
+_IMAGE_VERSION="__IMAGE_VERSION__"
+_BUILD_ID="__BUILD_ID__"
+_BUILD_DATE="__BUILD_DATE__"
+
+printf '%s' "${OPENVPN_VERSION_INFO}"            > "${ENV_DIR}/OPENVPN_VERSION_INFO"
+printf '%s' "${_NORDVPNAPI_IP_DEFAULT}"          > "${ENV_DIR}/NORDVPNAPI_IP_DEFAULT"
+printf '%s' "${_IMAGE_AUTHOR}"                   > "${ENV_DIR}/IMAGE_AUTHOR"
+printf '%s' "${_IMAGE_REPOSITORY}"               > "${ENV_DIR}/IMAGE_REPOSITORY"
+printf '%s' "${_IMAGE_DOCUMENTATION}"            > "${ENV_DIR}/IMAGE_DOCUMENTATION"
+printf '%s' "${_IMAGE_VERSION}"                  > "${ENV_DIR}/IMAGE_VERSION"
+printf '%s' "${_BUILD_ID}"                       > "${ENV_DIR}/BUILD_ID"
+printf '%s' "${_BUILD_DATE}"                     > "${ENV_DIR}/BUILD_DATE"
+
+printf '%s' "${IPT}"  > "${ENV_DIR}/IPT"
+printf '%s' "${IP6T}" > "${ENV_DIR}/IP6T"
+
+log "Wrote IPT=${IPT} to s6 container environment at ${ENV_DIR}"
+#if [ -d "${ENV_DIR}" ]; then
+#    IPT=$(cat ${ENV_DIR}/IPT)
+#    IP6T=$(cat ${ENV_DIR}/IP6T)
+#    log "DEBUG: IPT  = '${IPT:-unset}'"
+#    log "DEBUG: IP6T = '${IP6T:-unset}'"
+#fi
+
+log "Using IPv4 backend: ${IPT:-unknown}"
+
+# ── Other environment variables (keep + expand as needed) ───────────────────────────
+
+printf '%s' "${TECHNOLOGY:-openvpn_udp}"           > "${ENV_DIR}/TECHNOLOGY"
+printf '%s' "${RANDOM_TOP:-0}"                     > "${ENV_DIR}/RANDOM_TOP"
+printf '%s' "${NORDVPNAPI_IP:-${NORDVPNAPI_IP_DEFAULT:-}}" > "${ENV_DIR}/NORDVPNAPI_IP"
+
+printf '%d' "${CHECK_CONNECTION_ATTEMPTS:-5}"      > "${ENV_DIR}/CHECK_CONNECTION_ATTEMPTS"
+printf '%d' "${CHECK_CONNECTION_ATTEMPT_INTERVAL:-10}" > "${ENV_DIR}/CHECK_CONNECTION_ATTEMPT_INTERVAL"
+
+# Example: computed paths
+printf '%s' "/run/xt/openvpn-mgmt.sock"            > "${ENV_DIR}/MGMT_SOCK_FILE"
+printf '%s' "/run/xt/auth.txt"                     > "${ENV_DIR}/OVPN_AUTH_FILE"
+printf '%s' "/run/xt/nordvpn.ovpn"                 > "${ENV_DIR}/OVPN_FILE"
+printf '%s' "/usr/local/share/nordvpn/data/template.ovpn" > "${ENV_DIR}/OVPN_TEMPLATE_FILE"
+
+# If you have dynamic values (e.g. from API call, parsing, …)
+# vpn-config --print-some-value > "${ENV_DIR}/SOME_DYNAMIC_VAR"   # or similar
+
+METADATA_DIR="${METADATA_DIR:=/usr/local/share/nordvpn/data}"
+printf '%s' "${METADATA_DIR}"      > "${ENV_DIR}/METADATA_DIR"
+
+mkdir -p "${METADATA_DIR}"
+
+# Optional: touch a flag file so later services know this ran
+touch /run/backend-env.ready
+
+log "Shared environment written (${ENV_DIR})"

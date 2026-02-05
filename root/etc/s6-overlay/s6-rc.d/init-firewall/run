@@ -1,72 +1,13 @@
-#!/command/with-contenv sh
-# shellcheck shell=sh
+#!/command/with-contenv bash
+# shellcheck shell=bash
 
 set -eu
 
 . /usr/local/bin/backend-functions
 
-SCRIPT_NAME="INIT-FIREWALL"
+log "Initializing firewall"
 
-log "$SCRIPT_NAME" "Starting firewall initialization"
-log "$SCRIPT_NAME" "Configuring firewall to route all traffic through VPN"
+/usr/local/bin/init-firewall
 
-
-# BusyBox-friendly helpers
-
-docker_network="$(ip addr show dev eth0 2>/dev/null | awk '/inet / {print $2; exit}')"
-
-# BusyBox-friendly helpers
-docker_network="$(ip addr show dev eth0 2>/dev/null | awk '/inet / {print $2; exit}')"
-gw="$(ip route 2>/dev/null | awk '/default/ {print $3; exit}')"
-
-# ===================== IPv4 =====================
-if [ -n "$docker_network" ]; then
-    log "$SCRIPT_NAME" "Setting up IPv4 firewall rules..."
-
-    # Stateful fast-path (skip gracefully if conntrack match absent)
-    run4_critical -A INPUT  -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-    run4_critical -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-
-    # Allow outbound to VPN interfaces + NAT
-    run4_critical -A OUTPUT -o tun0 -j ACCEPT
-    run4_critical -t nat -A POSTROUTING -o tun0 -j MASQUERADE
-
-    # Create named chain for VPN Server rules
-    run4 -N VPN-SERVER
-    run4 -A OUTPUT -p udp --dport 1194 -j VPN-SERVER
-    run4 -A OUTPUT -p tcp --dport 443 -j VPN-SERVER
-
-    # NordVPN API bootstrap (TCP/443) by resolved IPs
-    if [ -n "$nordvpnapi_ip" ]; then
-        log "$SCRIPT_NAME" "Allowing NordVPN API access for IPs: ${nordvpnapi_ip}"
-        oldIFS="$IFS"; IFS=',;'
-        for ip in $nordvpnapi_ip; do
-            [ -z "$ip" ] && continue
-            run4 -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT
-        done
-        IFS="$oldIFS"
-    fi
-
-    # NETWORK rules (CIDRs). If present, restrict inbound to these nets; do NOT add the broad eth0 accept.
-    if [ -n "${network:-}" ]; then
-        log "$SCRIPT_NAME" "Allowing access to custom networks: ${network}"
-        oldIFS="$IFS"; IFS=',;'
-        for net in $network; do
-            [ -z "$net" ] && continue
-            # Best-effort route add (if not already present)
-            if [ -n "$gw" ]; then
-                ip route 2>/dev/null | grep -q " ${net} " || ip route add "$net" via "$gw" dev eth0 2>/dev/null || true
-            fi
-            # Allow inbound from this network only
-            run4 -A INPUT -i eth0 -s "$net" -j ACCEPT
-            # Allow outbound to this network only
-            run4 -A OUTPUT -o eth0 -d "$net" -j ACCEPT
-        done
-        IFS="$oldIFS"
-    fi
-else
-    log "$SCRIPT_NAME" "No IPv4 address on eth0, skipping IPv4 rules"
-fi
-
-log "$SCRIPT_NAME" "Firewall initialization completed"
+log "Firewall initialization completed"
 exit 0

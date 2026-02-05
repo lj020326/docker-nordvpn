@@ -1,0 +1,19 @@
+#!/bin/bash
+# shellcheck shell=bash
+
+. /usr/local/bin/backend-functions
+
+# Display project information
+echo "=================================================================================="
+echo "🚀 NordVPN OpenVPN Docker Container"
+echo "=================================================================================="
+echo "📋 Description: Docker container for NordVPN with OpenVPN and advanced networking"
+echo "👤 Author: ${IMAGE_AUTHOR}"
+echo "🔗 Repository: ${IMAGE_REPOSITORY}"
+echo "📚 Documentation: ${IMAGE_DOCUMENTATION}"
+echo "🏷  Image Version: ${IMAGE_VERSION}"
+echo "🏷  Build ID: ${BUILD_ID}"
+echo "📅 Build Date: ${BUILD_DATE}"
+echo "📅 NordVPN API IP: ${NORDVPNAPI_IP}"
+echo "🏷  OpenVPN Version: ${OPENVPN_VERSION_INFO}"
+echo "=================================================================================="

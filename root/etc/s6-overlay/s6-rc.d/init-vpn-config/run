@@ -1,0 +1,14 @@
+#!/command/with-contenv bash
+# shellcheck shell=bash
+
+set -eu
+
+. /usr/local/bin/backend-functions
+
+log "Initialize NordVPN service configuration"
+
+# 1. Run the configuration script
+init-vpn-config
+
+log "NordVPN configuration completed"
+exit 0

@@ -1,44 +1,273 @@
-#!/bin/sh
-# shellcheck shell=sh
+#!/bin/bash
+# shellcheck shell=bash
 
-# Reuse backend selected by entrypoint
-[ -r /run/xt/backend.env ] && . /run/xt/backend.env
+# In s6-overlay (v3+ in particular), the recommended and most idiomatic way to share a set of
+# computed / dynamic environment variables across multiple services (oneshots + longruns)
+# is not to create and source a traditional .env shell file like /run/xt/backend.env.
+#
+# Instead, use the built-in mechanism using a service (s6-rc.d/init-environment):
+#   Write name=value pairs as files into /var/run/s6/container_environment/
+#   (or /run/s6/container_environment/ — both are usually symlinked)
+#   s6-overlay automatically imports every file in that directory as an environment variable
+#     (filename = variable name, content = value)
+#   into every process that is started with #!/usr/bin/with-contenv or #!/command/with-contenv
+#
+# Then make sure services that need these variables depend on it:
+# Example:
+# run init-environment to set env vars
+# in all other services svc-*/dependencies:
+#   init-environment
 
-# Create lowercase copies of environment variables
-country="${COUNTRY:-}"
-city="${CITY:-}"
-technology="${TECHNOLOGY:-OpenVPN UDP}"
-group="${GROUP:-}"
-random_top="${RANDOM_TOP:-0}"
-openvpn_opts="${OPENVPN_OPTS:-}"
-network_diagnostic_enabled="${NETWORK_DIAGNOSTIC_ENABLED:-false}"
-check_connection_attempts="${CHECK_CONNECTION_ATTEMPTS:-5}"
-check_connection_url="${CHECK_CONNECTION_URL:-https://www.google.com}"
-check_connection_attempt_interval="${CHECK_CONNECTION_ATTEMPT_INTERVAL:-10}"
-user="${USER:-}"
-pass="${PASS:-}"
-recreate_vpn_cron="${RECREATE_VPN_CRON:-}"
-check_connection_cron="${CHECK_CONNECTION_CRON:-}"
-nordvpnapi_ip="${NORDVPNAPI_IP:-104.16.208.203;104.19.159.190}"
-network="${NETWORK:-}"
-puid=${PUID:-912}
-pgid=${PGID:-912}
+case "${DEBUG:-false}" in
+    trace*)
+      set -x
+      echo "DEBUG value is: ${DEBUG+set to '$DEBUG'}" >&2
+      ;;
+esac
 
-# Common file paths
-ovpntemplatefile="/usr/local/share/nordvpn/data/template.ovpn"
-ovpnfile="/run/xt/nordvpn.ovpn"
-authfile="/run/xt/auth"
-mgmtsockfile="/run/xt/openvpn-mgmt.sock"
+OPENVPN_OPTS="${OPENVPN_OPTS:-}"
+NETWORK_DIAGNOSTIC_ENABLED="${NETWORK_DIAGNOSTIC_ENABLED:-false}"
+CHECK_CONNECTION_ATTEMPTS="${CHECK_CONNECTION_ATTEMPTS:-5}"
+CHECK_CONNECTION_URL="${CHECK_CONNECTION_URL:-https://www.google.com}"
+CHECK_CONNECTION_ATTEMPT_INTERVAL="${CHECK_CONNECTION_ATTEMPT_INTERVAL:-10}"
+USER="${USER:-}"
+PASS="${PASS:-}"
+RECREATE_VPN_CRON="${RECREATE_VPN_CRON:-}"
+CHECK_CONNECTION_CRON="${CHECK_CONNECTION_CRON:-}"
+NORDVPNAPI_IP="${NORDVPNAPI_IP:-${CURRENT_API_IP:-${NORDVPNAPI_IP_DEFAULT:-}}}"
 
+NETWORK="${NETWORK:-}"
+PUID="${PUID:-912}"
+PGID="${PGID:-912}"
+
+##################
+# logging functions
+# Internal helper to handle metadata, formatting, and level filtering
+
+#### LOGGING RELATED
+LOG_ERROR=0
+LOG_WARN=1
+LOG_FAILED=2
+LOG_SUCCESS=3
+LOG_INFO=4
+LOG_TRACE=5
+LOG_DEBUG=6
+
+declare -A LOGLEVEL_TO_STR
+LOGLEVEL_TO_STR["${LOG_ERROR}"]="ERROR"
+LOGLEVEL_TO_STR["${LOG_WARN}"]="WARN"
+LOGLEVEL_TO_STR["${LOG_FAILED}"]="FAILED"
+LOGLEVEL_TO_STR["${LOG_SUCCESS}"]="SUCCESS"
+LOGLEVEL_TO_STR["${LOG_INFO}"]="INFO"
+LOGLEVEL_TO_STR["${LOG_TRACE}"]="TRACE"
+LOGLEVEL_TO_STR["${LOG_DEBUG}"]="DEBUG"
+
+# string formatters
+# Force color if FORCE_COLOR is set, otherwise auto-detect TTY
+if [[ -n "${FORCE_COLOR:-}" ]] || [[ -t 1 ]]; then
+    tty_escape() { printf "\033[%sm" "$1"; }
+else
+    tty_escape() { :; }
+fi
+tty_mkbold() { tty_escape "1;$1"; }
+tty_underline="$(tty_escape "4;39")"
+tty_dim_grey="$(tty_escape "2;39")"
+tty_red="$(tty_mkbold 31)"
+tty_green="$(tty_mkbold 32)"
+tty_yellow="$(tty_mkbold 33)"
+tty_blue="$(tty_mkbold 34)"
+tty_magenta="$(tty_mkbold 35)"
+tty_cyan="$(tty_mkbold 36)"
+tty_bold="$(tty_mkbold 39)"
+tty_reset="$(tty_escape 0)"
+
+function shell_join() {
+  local arg
+  printf "%s" "$1"
+  shift
+  for arg in "$@"
+  do
+    printf " "
+    printf "%s" "${arg// /\ }"
+  done
+}
+
+function chomp() {
+  printf "%s" "${1/"$'\n'"/}"
+}
+
+function reverse_array() {
+  local -n array_source_ref=$1
+  local -n reversed_array_ref=$2
+  # iterate over the keys of the loglevel_to_str array
+  for key in "${!array_source_ref[@]}"; do
+    # get the value associated with the current key
+    value="${array_source_ref[$key]}"
+    # add the reversed key-value pair to the reversed_array_ref array
+    reversed_array_ref["$value"]="$key"
+  done
+}
+
+declare -A LOGLEVELSTR_TO_LEVEL
+reverse_array LOGLEVEL_TO_STR LOGLEVELSTR_TO_LEVEL
+
+LOG_LEVEL_IDX="${LOG_INFO}"
+LOG_LEVEL_PADDING_LENGTH=7
+LOG_INCLUDE_INVOKER=true
+#LOG_PAD_LEVEL=true
+
+# --- Logging Functions ---
+
+function _log_message() {
+    local log_message_level="${1}"
+    local log_message="${2}"
+    local log_prefix="${3:-}"
+
+    if (( log_message_level > LOG_LEVEL_IDX )); then
+        return 0
+    fi
+
+    local log_level_str="${LOGLEVEL_TO_STR[$log_message_level]}"
+    [[ -z "$log_level_str" ]] && { echo "Unknown level: $log_message_level" >&2; return 1; }
+
+    local log_level_display="${log_level_str}"
+    if [[ "${LOG_PAD_LEVEL:-false}" = "true" ]] || [[ "${LOG_PAD_LEVEL:-0}" = "1" ]]; then
+        printf -v log_level_display "%-${LOG_LEVEL_PADDING_LENGTH}s" "${log_level_str}"
+    fi
+
+    local log_context=""
+    local _log_tty_color="${tty_reset}"
+
+    if [ -n "${BASH_VERSION:-}" ]; then
+        local script_path="${BASH_SOURCE[2]##*/}"
+
+        # Build Call Stack: skip _log_message (0) and wrapper (1)
+        local stack_parts=("${FUNCNAME[@]:2}")
+        local call_stack=""
+
+        for (( i=${#stack_parts[@]}-1; i>=0; i-- )); do
+            local func="${stack_parts[i]}"
+
+            # Normalize 'source' to 'main' or keep existing 'main'
+            if [[ "$func" == "main" || "$func" == "source" ]]; then
+                # Only add 'main' if it's the first thing in our built stack
+                if [[ -z "$call_stack" ]]; then
+                    call_stack="main"
+                fi
+            else
+                # Add real function names, separated by colons
+                [[ -n "$call_stack" ]] && call_stack+=":"
+                call_stack+="$func"
+            fi
+        done
+
+        # If call_stack is empty (called from top-level), just use the script name
+        # Otherwise, append the stack with parentheses
+        local func_context=""
+        if [[ -n "$call_stack" ]]; then
+            func_context="${call_stack%:}()"
+        fi
+
+        local line_no="${BASH_LINENO[1]}"
+
+        case "${log_message_level}" in
+            "$LOG_DEBUG") _log_tty_color="${tty_dim_grey}"; log_context="${func_context}[${line_no}]" ;;
+            "$LOG_TRACE") _log_tty_color="${tty_blue}";     log_context="${func_context}[${line_no}]" ;;
+            "$LOG_SUCCESS") _log_tty_color="${tty_green}"; log_context="${func_context}" ;;
+            "$LOG_FAILED")  _log_tty_color="${tty_red}";   log_context="${func_context}" ;;
+            "$LOG_WARN")  _log_tty_color="${tty_yellow}";  log_context="${func_context}" ;;
+            "$LOG_ERROR") _log_tty_color="${tty_red}";     log_context="${func_context}[${line_no}]" ;;
+            *)            _log_tty_color="${tty_reset}";   log_context="${func_context}" ;;
+        esac
+    else
+        log_context="$(basename "$0")"
+    fi
+
+    [[ "${LOG_INCLUDE_INVOKER:-false}" = "true" ]] || [[ "${LOG_INCLUDE_INVOKER:-0}" = "1" ]] && log_context="${script_path}=>${log_context}"
+    [[ -n "${log_prefix}" ]] && log_context="${log_prefix}::${log_context}"
+
+    # Standardized Output
+#    printf "${_log_tty_color}%s [%s] %s:${tty_reset} %s\n" "$(date '+%Y-%m-%d %H:%M:%S')" "$log_message_level" "$log_context" "$log_message"
+    printf "[%s] ${_log_tty_color}%s %s${tty_reset}\n" "$log_level_display" "$log_context" "$log_message"
+}
+
+# Wrapper Functions with Prefix Support
+log()                { _log_message "${LOG_INFO}"           "$1" "${2:-}"; }
+log_debug()          { _log_message "${LOG_DEBUG}"          "$1" "${2:-}"; }
+log_trace()          { _log_message "${LOG_TRACE}"          "$1" "${2:-}"; }
+log_info()           { _log_message "${LOG_INFO}"           "$1" "${2:-}"; }
+log_success()        { _log_message "${LOG_SUCCESS}"        "$1" "${2:-}"; }
+log_failed()         { _log_message "${LOG_FAILED}"         "$1" "${2:-}"; }
+log_warn()           { _log_message "${LOG_WARN}"           "$1" "${2:-}"; }
+log_error()          { _log_message "${LOG_ERROR}"          "$1" "${2:-}"; }
+
+function ohai()  { printf "${tty_blue}==>${tty_bold} %s${tty_reset}\n" "$*"; }
+function abort() { log_error "$1"; exit 1; }
+function warn()  { log_warn "$1"; }
+function error() { log_error "$1"; }
+function fail()  { error "$1"; exit 1; }
+
+# Special test wrapper (Includes Invoker info)
+log_test() {
+    local log_message_level="${1}"
+    local log_message="${2}"
+    local invoker_prefix=""
+
+    # BASH_SOURCE[3] is the file that executed the current script
+    if [ -n "${BASH_VERSION:-}" ] && [[ -n "${BASH_SOURCE[3]:-}" ]]; then
+        local parent_script="${BASH_SOURCE[3]##*/}"
+        log_debug "parent_script=${parent_script}"
+        invoker_prefix="(Invoker: ${parent_script}) "
+    fi
+
+    _log_message "${log_message_level}" "$log_message" "$invoker_prefix"
+}
+
+function set_log_level() {
+  local level_idx="${LOGLEVELSTR_TO_LEVEL[${1^^}]}" # ^^ makes it case-insensitive
+  if [[ -n "$level_idx" ]]; then
+    LOG_LEVEL_IDX="$level_idx"
+  else
+    abort "Unknown log level: [$1]"
+  fi
+}
+
+export -f _log_message log log_info log_debug log_trace log_warn log_error log_test
+
+if [ -n "${LOG_LEVEL:-}" ]; then
+    log_debug "Setting logger log level to ${LOG_LEVEL}"
+    set_log_level "${LOG_LEVEL}"
+fi
+
+# ---- helper functions ---------------------------------------------------------------
+
+normalize_proto()
+{
+    # Map OpenVPN tokens to "udp" or "tcp" (family handled by IP literal)
+    case "$(echo "$1" | tr 'A-Z' 'a-z')" in
+        tcp|tcp-client|tcp-server|tcp6|tcp6-client|tcp6-server) echo "tcp" ;;
+        udp|udp-client|udp-server|udp6|udp6-client|udp6-server|"") echo "udp" ;;
+        *) echo "udp" ;;
+    esac
+}
+
+##################
+## Firewall related functions
 run4() {
-    if ! ${IPT} "$@" 2>/dev/null; then
+    backend="${IPT:-iptables}"
+    if [ -z "$backend" ]; then
+        log_error "No IPv4 backend – using fallback iptables"
+        backend="iptables"
+    fi
+    if ! "$backend" "$@" 2>/dev/null; then
         log "BACKEND" "(IPv4) skipped: $*"
     fi
 }
 
 run4_critical() {
-    if ! ${IPT} "$@" 2>/dev/null; then
-        log_error "BACKEND" "(IPv4) CRITICAL ERROR: Failed to execute: $* - sleeping infinite"
+    backend="${IPT:-iptables}"
+    if ! ${backend} "$@" 2>/dev/null; then
+        log_error "(IPv4) CRITICAL ERROR: Failed to execute: $* - sleeping infinite"
         sleep infinity
     fi
 }
@@ -54,7 +283,7 @@ run6() {
 run6_critical() {
     if [ -n "$IP6T" ]; then
         if ! ${IP6T} "$@" 2>/dev/null; then
-            log_error "BACKEND" "(IPv6) CRITICAL ERROR: Failed to execute: $*"
+            log_error "(IPv6) CRITICAL ERROR: Failed to execute: $*"
         fi
     fi
 }
@@ -68,27 +297,34 @@ is_vpn_connected() {
     fi
 }
 
-log()
+
+flush_nft_if_dirty_v4()
 {
-    script_name="${1:-unknown}"
-    shift
-    printf "%s [%s] %s\n" "$(date +'%Y-%m-%d %H:%M:%S')" "${script_name}" "$*"
+    # Flush nftables v4 only if we selected legacy for v4 AND nft tables actually carry rules
+    if [ "${IPT:-}" = "iptables-legacy" ] && command -v iptables-nft >/dev/null 2>&1; then
+        if iptables-nft -S 2>/dev/null | grep -q '^-A ' || iptables-nft -t nat -S 2>/dev/null | grep -q '^-A '; then
+            iptables-nft -F 2>/dev/null || true
+            iptables-nft -t nat -F 2>/dev/null || true
+            iptables-nft -X 2>/dev/null || true
+            log "${SCRIPT_NAME}" "Flushed IPv4 nftables to avoid mixed stacks"
+        fi
+    fi
 }
 
-log_error()
+flush_nft_if_dirty_v6()
 {
-    script_name="${1:-unknown}"
-    shift
-    printf "%s [%s] [ERROR] %s\n" "$(date +'%Y-%m-%d %H:%M:%S')" "${script_name}" "$*" >&2
+    # Flush nftables v6 only if we selected legacy for v6 AND nft v6 tables actually carry rules
+    if [ -n "${IP6T:-}" ] && [ "${IP6T}" = "ip6tables-legacy" ] && command -v ip6tables-nft >/dev/null 2>&1; then
+        if ip6tables-nft -S 2>/dev/null | grep -q '^-A ' || ip6tables-nft -t nat -S 2>/dev/null | grep -q '^-A '; then
+            ip6tables-nft -F 2>/dev/null || true
+            ip6tables-nft -t nat -F 2>/dev/null || true
+            ip6tables-nft -X 2>/dev/null || true
+            log "${SCRIPT_NAME}" "Flushed IPv6 nftables to avoid mixed stacks"
+        fi
+    fi
 }
 
-log_warning()
-{
-    script_name="${1:-unknown}"
-    shift
-    printf "%s [%s] [WARNING] %s\n" "$(date +'%Y-%m-%d %H:%M:%S')" "${script_name}" "$*"
-}
-
+##################
 # Parse cron expression and return human-readable description
 parse_cron()
 {
@@ -110,9 +346,9 @@ parse_cron()
     
     # Helper function to parse cron field values
     parse_field() {
-        local field_value="$1"
-        local field_type="$2"
-        local result=""
+        field_value="$1"
+        field_type="$2"
+        result=""
         
         # Handle asterisk (every value)
         if [ "$field_value" = "*" ]; then
@@ -503,4 +739,90 @@ parse_cron()
     fi
     
     echo "$description"
+}
+
+kernel_ge_4_18()
+{
+    ver="$(uname -r | awk -F- '{print $1}')"    # e.g., 4.4.0 or 6.8.0
+    major="$(echo "$ver" | awk -F. '{print $1}')"
+    minor="$(echo "$ver" | awk -F. '{print $2}')"
+    [ -n "$minor" ] || minor=0
+    if [ "$major" -gt 4 ]; then return 0; fi
+    if [ "$major" -lt 4 ]; then return 1; fi
+    [ "$minor" -ge 18 ]
+}
+
+try_policy()
+{
+    _bin="$1"
+    # Prove backend can change policy on this kernel (DROP then revert)
+    $_bin -t filter -S >/dev/null 2>&1 || return 1
+    if $_bin -t filter -P OUTPUT DROP >/dev/null 2>&1; then
+        $_bin -t filter -P OUTPUT ACCEPT >/dev/null 2>&1 || true
+        return 0
+    fi
+    return 1
+}
+
+# ---- IPv4 backend picker: prefer nft on ≥4.18; else legacy -----------------
+
+pick_ipv4_backend()
+{
+    _IPT=""
+    if kernel_ge_4_18; then
+        if command -v iptables >/dev/null 2>&1 && iptables -V 2>&1 | grep -qi "(nf_tables)"; then
+            try_policy iptables && _IPT="iptables"
+        fi
+        [ -n "$_IPT" ] || { command -v iptables-legacy >/dev/null 2>&1 && try_policy iptables-legacy && _IPT="iptables-legacy"; }
+        [ -n "$_IPT" ] || { command -v iptables >/dev/null 2>&1 && try_policy iptables && _IPT="iptables"; }
+    else
+        if command -v iptables-legacy >/dev/null 2>&1; then
+            try_policy iptables-legacy && _IPT="iptables-legacy"
+        fi
+        [ -n "$_IPT" ] || { command -v iptables >/dev/null 2>&1 && try_policy iptables && _IPT="iptables"; }
+    fi
+    [ -n "$_IPT" ] || { log_error "ERROR: no working iptables (IPv4) found"; exit 1; }
+
+    log "Kernel: $(uname -r)"
+    log "Using iptables backend: ${_IPT}"
+}
+
+# ---- IPv6 backend picker: prefer nft on ≥4.18; else legacy -----------------
+
+pick_ipv6_backend()
+{
+    _IP6T=""
+    if kernel_ge_4_18; then
+        if command -v ip6tables >/dev/null 2>&1 && ip6tables -V 2>&1 | grep -qi "(nf_tables)"; then
+            try_policy ip6tables && _IP6T="ip6tables"
+        fi
+        [ -n "$_IP6T" ] || { command -v ip6tables-legacy >/dev/null 2>&1 && try_policy ip6tables-legacy && _IP6T="ip6tables-legacy"; } || true
+        [ -n "$_IP6T" ] || { command -v ip6tables >/dev/null 2>&1 && try_policy ip6tables && _IP6T="ip6tables"; } || true
+    else
+        if command -v ip6tables-legacy >/dev/null 2>&1; then
+            try_policy ip6tables-legacy && _IP6T="ip6tables-legacy"
+        fi
+        [ -n "$_IP6T" ] || { command -v ip6tables >/dev/null 2>&1 && try_policy ip6tables && _IP6T="ip6tables"; } || true
+    fi
+
+    # Last-resort: if a binary exists at all, use it (even if probe failed)
+    [ -n "$_IP6T" ] || { command -v ip6tables-legacy >/dev/null 2>&1 && _IP6T="ip6tables-legacy"; } || true
+    [ -n "$_IP6T" ] || { command -v ip6tables >/dev/null 2>&1 && _IP6T="ip6tables"; } || true
+
+    if [ -n "$_IP6T" ]; then
+        log "Using ip6tables backend: ${_IP6T}"
+    else
+        log "IPv6 support unavailable"
+    fi
+}
+
+verify_ipv6_backend()
+{
+    # If we picked something for v6, make sure v6 tables actually exist and nat table is usable.
+    if [ -n "$_IP6T" ]; then
+        if ! ${_IP6T} -t filter -S >/dev/null 2>&1 || ! ${_IP6T} -t nat -F >/dev/null 2>&1; then
+            log "IPv6 tables unavailable in current namespace"
+            _IP6T=""
+        fi
+    fi
 }

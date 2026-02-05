@@ -1,19 +1,17 @@
-#!/command/with-contenv sh
-# shellcheck shell=sh
+#!/command/with-contenv bash
+# shellcheck shell=bash
 
 set -eu
 
 . /usr/local/bin/backend-functions
 
-SCRIPT_NAME="INIT-CREATEAUTH"
+log "Starting authentication setup"
 
-log "$SCRIPT_NAME" "Starting authentication setup"
+log "Creating VPN authentication file"
+echo "$USER" > "$OVPN_AUTH_FILE"
+echo "$PASS" >> "$OVPN_AUTH_FILE"
+chmod 0600 "$OVPN_AUTH_FILE"
+chown nordvpn:nordvpn "$OVPN_AUTH_FILE"
 
-log "$SCRIPT_NAME" "Creating VPN authentication file"
-echo "$user" > "$authfile"
-echo "$pass" >> "$authfile"
-chmod 0600 "$authfile"
-chown nordvpn:nordvpn "$authfile"
-
-log "$SCRIPT_NAME" "Authentication setup completed"
+log "Authentication setup completed"
 exit 0

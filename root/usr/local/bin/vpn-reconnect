@@ -1,19 +1,17 @@
-#!/command/with-contenv sh
-# shellcheck shell=sh
+#!/command/with-contenv bash
+# shellcheck shell=bash
 
 set -eu
 
 . /usr/local/bin/backend-functions
 
-SCRIPT_NAME="VPN-RECONNECT"
+log "Starting VPN reconnection"
 
-log "$SCRIPT_NAME" "Starting VPN reconnection"
-
-log "$SCRIPT_NAME" "Stopping NordVPN service"
+log "Stopping NordVPN service"
 s6-rc stop svc-nordvpn
 sleep 2
-log "$SCRIPT_NAME" "Starting NordVPN service"
+log "Starting NordVPN service"
 s6-rc start svc-nordvpn
 
-log "$SCRIPT_NAME" "VPN reconnection completed"
+log "VPN reconnection completed"
 exit 0
