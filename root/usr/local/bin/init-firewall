@@ -36,17 +36,21 @@ done
 log "Allow loopback (critical for internal plumbing)"
 run4 -A INPUT  -i lo -j ACCEPT
 run4 -A OUTPUT -o lo -j ACCEPT
-run4 -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+
+log "Allow established/related connections (very important for return traffic)"
+run4 -A INPUT  -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+run4 -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
 # 4. NETWORK DETECTION
 docker_network=$(ip addr show dev eth0 2>/dev/null | awk '/inet / {print $2}')
 gw=$(ip route | awk '/default/ { print $3 }')
 
+# 5. DNS & API ACCESS (bootstrap)
 log "Allow DNS for resolution"
 run4 -A OUTPUT -p udp --dport 53 -j ACCEPT
 run4 -A OUTPUT -p tcp --dport 53 -j ACCEPT
 
-log "Allow HTTPS for API calls"
+log "Allow HTTPS for API calls (general, not just specific IPs)"
 run4 -A OUTPUT -p tcp --dport 443 -j ACCEPT
 
 # 5. BOOTSTRAP NORDVPN API ACCESS
@@ -54,9 +58,8 @@ if [[ ${#API_IPS[@]} -gt 0 ]]; then
     log "Allowing NordVPN API access for IPs: ${API_IPS[*]}"
     for ip in "${API_IPS[@]}"; do
         [[ -z "$ip" ]] && continue
-        log_debug "Allowing ping access for IP: ${ip}"
+        log_debug "Allowing ping & HTTPS to Nord API: ${ip}"
         run4 -A OUTPUT -d "$ip" -p icmp -j ACCEPT
-        log_debug "Allowing https access for IP: ${ip}"
         run4 -A OUTPUT -d "$ip" -p tcp --dport 443 -j ACCEPT
     done
 
@@ -64,13 +67,13 @@ if [[ ${#API_IPS[@]} -gt 0 ]]; then
     api-connection-tests
 fi
 
-# 6. CUSTOM NETWORK ACCESS
+# 6. CUSTOM NETWORK ACCESS (your LAN subnets)
 IFS=',; ' read -ra CUSTOM_NETS <<< "${NETWORK:-}"
 if [[ ${#CUSTOM_NETS[@]} -gt 0 ]]; then
     log "Allowing access to custom networks: ${CUSTOM_NETS[*]}"
     for net in "${CUSTOM_NETS[@]}"; do
-        log "Allowing access to custom network: ${net}"
         [[ -z "$net" ]] && continue
+        log "Allowing access to custom network: ${net}"
         # Add route if gateway is present
         if [[ -n "$gw" ]]; then
             log "Adding route to custom network [$net] gateway: ${gw}"
@@ -82,11 +85,41 @@ if [[ ${#CUSTOM_NETS[@]} -gt 0 ]]; then
     done
 fi
 
-# 7. CONFIGURE VPN ROUTING
+# ────────────────────────────────────────────────────────────────
+#  NEW: Explicit P2P outbound allowances
+# ────────────────────────────────────────────────────────────────
+
+log "Adding explicit outbound allowances for torrent / P2P traffic"
+
+# Common DHT / tracker ports (outbound destination)
+TORRENT_PORTS="6881:6999"          # classic range
+EXTRA_TORRENT_PORTS="51413,6969"   # some clients use these too
+
+# Allow outbound to these ports (TCP + UDP)
+for portrange in "$TORRENT_PORTS" $EXTRA_TORRENT_PORTS; do
+    run4 -A OUTPUT -p tcp -m multiport --dports "$portrange" -j ACCEPT
+    run4 -A OUTPUT -p udp -m multiport --dports "$portrange" -j ACCEPT
+done
+
+# Allow outbound ephemeral ports (very common for P2P clients)
+# This is often needed when the client initiates many connections
+run4 -A OUTPUT -p tcp --sport 1024:65535 -j ACCEPT
+run4 -A OUTPUT -p udp --sport 1024:65535 -j ACCEPT
+
+# Optional: Allow inbound on the listening port (if you do port-forwarding / UPnP)
+# Only enable if you really need incoming connections and have port-forwarding configured
+# LISTEN_PORT="${QBITTORRENT_PORT:-6881}"
+# run4 -A INPUT -p tcp --dport "$LISTEN_PORT" -j ACCEPT
+# run4 -A INPUT -p udp --dport "$LISTEN_PORT" -j ACCEPT
+
+# ────────────────────────────────────────────────────────────────
+
+# 7. CONFIGURE VPN ROUTING (last, so it doesn't interfere with bootstrap)
 log "Configuring firewall to route all traffic through VPN"
 run4 -N VPN-SERVER
 run4 -A OUTPUT -j VPN-SERVER
+
 run4 -A VPN-SERVER -p udp --dport 1194 -j ACCEPT
 run4 -A VPN-SERVER -p tcp --dport 443 -j ACCEPT
 
-log "Firewall initialization complete"
+log "Firewall initialization complete (with torrent outbound allowances)"
