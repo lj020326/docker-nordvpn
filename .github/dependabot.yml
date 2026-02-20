@@ -4,10 +4,39 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+      timezone: "UTC"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "github-actions"
+      - "automation"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "lj020326"
+    assignees:
+      - "lj020326"
 
-  # Configuration for Dockerfile
+  # Configuration for Dockerfile - Security-focused updates
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
-      interval: "daily"
+      interval: "daily"  # More frequent for security
+      time: "04:00"
+      timezone: "UTC"
+    commit-message:
+      prefix: "docker"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "docker"
+      - "security"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "lj020326"
+    assignees:
+      - "lj020326"

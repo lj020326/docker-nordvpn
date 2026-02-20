@@ -1,45 +1,68 @@
 # s6 overlay builder
-FROM alpine:3.18.3 AS s6-builder
+FROM alpine:3.23.3 AS s6-builder
+
+#ARG TARGETPLATFORM="x86_64"
+ARG TARGETARCH
+ARG TARGETVARIANT
 
 ENV PACKAGE="just-containers/s6-overlay"
-ENV PACKAGEVERSION="3.1.5.0"
-ARG TARGETPLATFORM
+ENV PACKAGEVERSION="3.2.2.0"
 
 RUN echo "**** install security fix packages ****" && \
     echo "**** install mandatory packages ****" && \
     apk --no-cache --no-progress add \
-        tar=1.34-r3 \
-        xz=5.4.3-r0 \
+        tar=1.35-r4 \
+        xz=5.8.2-r0 \
         && \
     echo "**** create folders ****" && \
     mkdir -p /s6 && \
     echo "**** download ${PACKAGE} ****" && \
-    PACKAGEPLATFORM=$(case ${TARGETPLATFORM} in \
-        "linux/amd64")    echo "x86_64"   ;; \
-        "linux/386")      echo "i486"     ;; \
-        "linux/arm64")    echo "aarch64"  ;; \
-        "linux/arm/v7")   echo "armhf"    ;; \
-        "linux/arm/v6")   echo "arm"      ;; \
-        *)                echo ""         ;; esac) && \
+    echo "Target arch: ${TARGETARCH}${TARGETVARIANT}" && \
+    # Map Docker TARGETARCH to s6-overlay architecture names
+    case "${TARGETARCH}${TARGETVARIANT}" in \
+        amd64)      s6_arch="x86_64" ;; \
+        arm64)      s6_arch="aarch64" ;; \
+        armv7)      s6_arch="arm" ;; \
+        armv6)      s6_arch="armhf" ;; \
+        386)        s6_arch="i686" ;; \
+        ppc64)      s6_arch="powerpc64" ;; \
+        ppc64le)    s6_arch="powerpc64le" ;; \
+        riscv64)    s6_arch="riscv64" ;; \
+        s390x)      s6_arch="s390x" ;; \
+        *)          s6_arch="x86_64" ;; \
+    esac && \
     echo "Package ${PACKAGE} platform ${PACKAGEPLATFORM} version ${PACKAGEVERSION}" && \
-    wget -q "https://github.com/${PACKAGE}/releases/download/v${PACKAGEVERSION}/s6-overlay-noarch.tar.xz" -qO /tmp/s6-overlay-noarch.tar.xz && \
-    wget -q "https://github.com/${PACKAGE}/releases/download/v${PACKAGEVERSION}/s6-overlay-${PACKAGEPLATFORM}.tar.xz" -qO /tmp/s6-overlay-binaries.tar.xz && \
+    s6_url_base="https://github.com/${PACKAGE}/releases/download/v${PACKAGEVERSION}" && \
+    wget -q "${s6_url_base}/s6-overlay-noarch.tar.xz" -qO /tmp/s6-overlay-noarch.tar.xz && \
+    wget -q "${s6_url_base}/s6-overlay-${s6_arch}.tar.xz" -qO /tmp/s6-overlay-binaries.tar.xz && \
+    wget -q "${s6_url_base}/s6-overlay-symlinks-noarch.tar.xz" -qO /tmp/s6-overlay-symlinks-noarch.tar.xz && \
+    wget -q "${s6_url_base}/s6-overlay-symlinks-arch.tar.xz" -qO /tmp/s6-overlay-symlinks-arch.tar.xz && \
     tar -C /s6/ -Jxpf /tmp/s6-overlay-noarch.tar.xz && \
-    tar -C /s6/ -Jxpf /tmp/s6-overlay-binaries.tar.xz
+    tar -C /s6/ -Jxpf /tmp/s6-overlay-binaries.tar.xz && \
+    tar -C /s6/ -Jxpf /tmp/s6-overlay-symlinks-noarch.tar.xz && \
+    tar -C /s6/ -Jxpf /tmp/s6-overlay-symlinks-arch.tar.xz
 
 # rootfs builder
-FROM alpine:3.18.3 AS rootfs-builder
+FROM alpine:3.23.3 AS rootfs-builder
+
+ARG IMAGE_VERSION=N/A \
+    BUILD_DATE=N/A
 
 RUN echo "**** install security fix packages ****" && \
+    echo "**** install mandatory packages ****" && \
+    apk --no-cache --no-progress add \
+        jq=1.8.1-r0 \
+        && \
     echo "**** end run statement ****"
 
 COPY root/ /rootfs/
 RUN chmod +x /rootfs/usr/bin/*
 RUN chmod +x /rootfs/etc/nordvpn/init/*
+RUN chmod +x /rootfs/etc/cont-init.d/*
 COPY --from=s6-builder /s6/ /rootfs/
 
 # Main image
-FROM alpine:3.18.3
+FROM alpine:3.19.1
 
 LABEL maintainer="Alexander Zinchenko <alexander@zinchenko.com>"
 
@@ -59,7 +82,7 @@ RUN echo "**** install security fix packages ****" && \
         jq \
         shadow \
         shadow-login \
-        openvpn=2.6.5-r0 \
+        openvpn \
         bind-tools
 
 RUN echo "**** create process user ****" && \

@@ -1,8 +1,6 @@
 #!/usr/bin/env groovy
 
-//@Library("pipeline-automation-lib@develop")_
-@Library("pipeline-automation-lib")_
+//@Library("pipelineAutomationLib@develop")_
+@Library("pipelineAutomationLib")_
 
-Map config = [:]
-
-buildDockerImage(config)
+buildDockerManifest()

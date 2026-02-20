@@ -26,6 +26,12 @@ This container was designed to be started first to provide a connection to other
 
 The image supports multiple architectures such as `amd64`, `x86`, `arm/v6`, `arm/v7` and `arm64`.
 
+### Building image
+
+```shell
+docker build -t docker-nordvpn --build-arg BUILD_ID=build-12 --build-arg BUILD_DATE=2024-09-30 .
+```
+
 ### Starting an NordVPN instance
 
 ```bash
