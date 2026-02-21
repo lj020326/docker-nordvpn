@@ -191,7 +191,7 @@ services:
       - traefik.http.services.dozzle-svc.loadbalancer.server.port=8080
 
   openvpn:
-    image: media.johnson.int:5000/docker-nordvpn:v1
+    image: lj020326/nordvpn:v1
     container_name: openvpn
     restart: unless-stopped
     environment:
@@ -204,13 +204,15 @@ services:
 #      OPENVPN_OPTS: --mute-replay-warnings --ping-exit 60
       PASS: passw0rd123
       RANDOM_TOP: 10
-      RECREATE_VPN_CRON: 5 */3 * * *
+      RECREATE_VPN_CRON: "5 */3 * * *"
       TZ: America/New_York
       USER: username123
     cap_add:
       - NET_ADMIN
     devices:
       - /dev/net/tun
+    tmpfs:
+      - /run/xt:mode=777
     networks:
       - vpn
       - traefik_public

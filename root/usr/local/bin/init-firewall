@@ -9,53 +9,52 @@ log "Starting firewall initialization"
 # 1. Parse NORDVPNAPI_IP into an Array
 # This handles both space, comma, and semicolon separators reliably
 IFS=',; ' read -ra API_IPS <<< "${NORDVPNAPI_IP:-}"
-
-log "Using API IP: ${API_IPS[*]} for bootstrap rules"
+log "Using API IPs: ${API_IPS[*]}"
 
 # 2. CLEAN SLATE & LOCKDOWN
-log "If we chose legacy for a family, clear any existing nft rules"
+log "Clearing any nft rules if legacy backend chosen"
 flush_nft_if_dirty_v4
 flush_nft_if_dirty_v6
 
-log "Applying security rules - all traffic blocked by default"
-
-log "Set default DROP policies"
+log "Setting default DROP policies"
 for cmd in run4_critical run6_critical; do
-    $cmd -t filter -P OUTPUT DROP
-    $cmd -t filter -P INPUT  DROP
+    $cmd -t filter -P INPUT   DROP
+    $cmd -t filter -P OUTPUT  DROP
     $cmd -t filter -P FORWARD DROP
 done
 
-log "Flush existing rules and delete custom chains"
+log "Flushing existing rules and chains"
 for table in filter nat; do
-    run4_critical -t "$table" -F; run4_critical -t "$table" -X
-    run6_critical -t "$table" -F; run6_critical -t "$table" -X
+    run4_critical -t "$table" -F
+    run4_critical -t "$table" -X
+    run6_critical -t "$table" -F
+    run6_critical -t "$table" -X
 done
 
-# 3. ESSENTIAL PERMISSIONS
-log "Allow loopback (critical for internal plumbing)"
+# 3. ESSENTIAL RULES (same as v1)
+log "Allow loopback"
 run4 -A INPUT  -i lo -j ACCEPT
 run4 -A OUTPUT -o lo -j ACCEPT
 
-log "Allow established/related connections (very important for return traffic)"
+log "Allow established/related (return traffic)"
 run4 -A INPUT  -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 run4 -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+run4 -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
 # 4. NETWORK DETECTION
-docker_network=$(ip addr show dev eth0 2>/dev/null | awk '/inet / {print $2}')
-gw=$(ip route | awk '/default/ { print $3 }')
+docker_network=$(ip addr show dev eth0 2>/dev/null | awk '/inet / {print $2}' | head -1)
+gw=$(ip route | awk '/default/ {print $3}' | head -1)
 
-# 5. DNS & API ACCESS (bootstrap)
-log "Allow DNS for resolution"
+# 5. DNS & API bootstrap (keep latest's safety)
+log "Allow DNS outbound"
 run4 -A OUTPUT -p udp --dport 53 -j ACCEPT
 run4 -A OUTPUT -p tcp --dport 53 -j ACCEPT
 
-log "Allow HTTPS for API calls (general, not just specific IPs)"
+log "Allow HTTPS outbound for API"
 run4 -A OUTPUT -p tcp --dport 443 -j ACCEPT
 
-# 5. BOOTSTRAP NORDVPN API ACCESS
 if [[ ${#API_IPS[@]} -gt 0 ]]; then
-    log "Allowing NordVPN API access for IPs: ${API_IPS[*]}"
+    log "Allowing NordVPN API bootstrap to: ${API_IPS[*]}"
     for ip in "${API_IPS[@]}"; do
         [[ -z "$ip" ]] && continue
         log_debug "Allowing ping & HTTPS to Nord API: ${ip}"
@@ -70,56 +69,34 @@ fi
 # 6. CUSTOM NETWORK ACCESS (your LAN subnets)
 IFS=',; ' read -ra CUSTOM_NETS <<< "${NETWORK:-}"
 if [[ ${#CUSTOM_NETS[@]} -gt 0 ]]; then
-    log "Allowing access to custom networks: ${CUSTOM_NETS[*]}"
+    log "Allowing custom networks: ${CUSTOM_NETS[*]}"
     for net in "${CUSTOM_NETS[@]}"; do
         [[ -z "$net" ]] && continue
-        log "Allowing access to custom network: ${net}"
-        # Add route if gateway is present
+        # Add route if needed
         if [[ -n "$gw" ]]; then
             log "Adding route to custom network [$net] gateway: ${gw}"
-            ip route 2>/dev/null | grep -q " ${net} " || \
             ip route add "$net" via "$gw" dev eth0 2>/dev/null || true
         fi
-        run4 -A INPUT -i eth0 -s "$net" -j ACCEPT
-        run4 -A OUTPUT -o eth0 -d "$net" -j ACCEPT
+        # v1-style: allow in INPUT, OUTPUT, FORWARD
+        run4 -A INPUT  -s "$net" -j ACCEPT
+        run4 -A OUTPUT -d "$net" -j ACCEPT
+        run4 -A FORWARD -s "$net" -j ACCEPT
+        run4 -A FORWARD -d "$net" -j ACCEPT
     done
 fi
 
-# ────────────────────────────────────────────────────────────────
-#  NEW: Explicit P2P outbound allowances
-# ────────────────────────────────────────────────────────────────
-
-log "Adding explicit outbound allowances for torrent / P2P traffic"
-
-# Common DHT / tracker ports (outbound destination)
-TORRENT_PORTS="6881:6999"          # classic range
-EXTRA_TORRENT_PORTS="51413,6969"   # some clients use these too
-
-# Allow outbound to these ports (TCP + UDP)
-for portrange in "$TORRENT_PORTS" $EXTRA_TORRENT_PORTS; do
-    run4 -A OUTPUT -p tcp -m multiport --dports "$portrange" -j ACCEPT
-    run4 -A OUTPUT -p udp -m multiport --dports "$portrange" -j ACCEPT
-done
-
-# Allow outbound ephemeral ports (very common for P2P clients)
-# This is often needed when the client initiates many connections
-run4 -A OUTPUT -p tcp --sport 1024:65535 -j ACCEPT
-run4 -A OUTPUT -p udp --sport 1024:65535 -j ACCEPT
-
-# Optional: Allow inbound on the listening port (if you do port-forwarding / UPnP)
-# Only enable if you really need incoming connections and have port-forwarding configured
-# LISTEN_PORT="${QBITTORRENT_PORT:-6881}"
-# run4 -A INPUT -p tcp --dport "$LISTEN_PORT" -j ACCEPT
-# run4 -A INPUT -p udp --dport "$LISTEN_PORT" -j ACCEPT
-
-# ────────────────────────────────────────────────────────────────
-
-# 7. CONFIGURE VPN ROUTING (last, so it doesn't interfere with bootstrap)
-log "Configuring firewall to route all traffic through VPN"
+# 7. STRICT VPN-ONLY OUTBOUND (like v1)
+log "Routing all other outbound through VPN only"
 run4 -N VPN-SERVER
 run4 -A OUTPUT -j VPN-SERVER
 
+# Only allow OpenVPN protocol ports
 run4 -A VPN-SERVER -p udp --dport 1194 -j ACCEPT
-run4 -A VPN-SERVER -p tcp --dport 443 -j ACCEPT
+run4 -A VPN-SERVER -p tcp --dport 443  -j ACCEPT
 
-log "Firewall initialization complete (with torrent outbound allowances)"
+# 8. EXTRA PROTECTION: Drop NEW incoming on non-tun interfaces
+# This prevents any unsolicited incoming (torrent, etc.) via host IP
+log "Blocking NEW incoming connections except on tun/tap/lo"
+run4 -I INPUT ! -i lo ! -i tun+ ! -i tap+ -m conntrack --ctstate NEW -j DROP
+
+log "Firewall initialization complete - strict non-leaking mode (v1 style)"
