@@ -159,7 +159,10 @@ or on older systems:
 ### Building image
 
 ```shell
-docker build -t docker-nordvpn --build-arg BUILD_ID=build-12 --build-arg BUILD_DATE=2024-09-30 .
+#docker build -t docker-nordvpn --build-arg BUILD_ID=build-12 --build-arg BUILD_DATE=2024-09-30 .
+## to output raw plain-text logs use the --progress flag:
+export DOCKER_BUILDKIT=1
+docker build --progress=plain -t docker-nordvpn --build-arg BUILD_ID=build-12 --build-arg BUILD_DATE=2024-09-30 .
 ```
 
 ### Getting Service Credentials

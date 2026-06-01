@@ -1,5 +1,6 @@
 # s6 overlay builder
-FROM alpine:3.23.3 AS s6-builder
+ARG ALPINE_VERSION="3.23.4"
+FROM alpine:${ALPINE_VERSION} AS s6-builder
 
 ARG TARGETARCH
 ARG TARGETVARIANT
@@ -10,8 +11,8 @@ ENV PACKAGEVERSION="3.2.2.0"
 RUN echo "**** install security fix packages ****" && \
     echo "**** install mandatory packages ****" && \
     apk --no-cache --no-progress add \
-        tar=1.35-r4 \
-        xz=5.8.2-r0 \
+        tar \
+        xz \
         && \
     echo "**** create folders ****" && \
     mkdir -p /s6 && \
@@ -42,7 +43,7 @@ RUN echo "**** install security fix packages ****" && \
     tar -C /s6/ -Jxpf /tmp/s6-overlay-symlinks-arch.tar.xz
 
 # rootfs builder
-FROM alpine:3.23.3 AS rootfs-builder
+FROM alpine:${ALPINE_VERSION} AS rootfs-builder
 
 ARG IMAGE_VERSION="N/A"
 ARG IMAGE_AUTHOR="Lee Johnson <ljohnson@dettonville.com>"
@@ -82,7 +83,7 @@ RUN chmod +x /rootfs/usr/local/bin/* || true && \
 COPY --from=s6-builder /s6/ /rootfs/
 
 # Main image
-FROM alpine:3.23.3
+FROM alpine:${ALPINE_VERSION}
 
 ARG TARGETPLATFORM
 
@@ -111,16 +112,16 @@ RUN echo "**** install security fix packages ****" && \
     echo "**** install mandatory packages ****" && \
     echo "Target platform: ${TARGETPLATFORM}" && \
     apk --no-cache --no-progress add \
-        bash=5.3.3-r1 \
-        curl=8.17.0-r1 \
-        iptables=1.8.11-r1 \
-        iptables-legacy=1.8.11-r1 \
-        jq=1.8.1-r0 \
-        shadow=4.18.0-r0 \
-        shadow-login=4.18.0-r0 \
-        openvpn=2.6.16-r0 \
-        bind-tools=9.20.18-r0 \
-        netcat-openbsd=1.234.1-r0 \
+        bash \
+        curl \
+        iptables \
+        iptables-legacy \
+        jq \
+        shadow \
+        shadow-login \
+        openvpn \
+        bind-tools \
+        netcat-openbsd \
         && \
     echo "**** create process user ****" && \
     addgroup --system --gid 912 nordvpn && \
